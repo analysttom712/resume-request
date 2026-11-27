@@ -61,6 +61,7 @@ def test_happy_path_sends_resume_once():
     owner_mail = ses.sent[0]
     assert owner_mail["Destination"] == {"ToAddresses": ["owner@example.com"]}
     assert owner_mail["ReplyToAddresses"] == ["ana@recruit.example"]
+    assert owner_mail["FeedbackForwardingEmailAddress"] == "owner@example.com"
     [req] = requests_in(ddb)
     assert req["status"]["S"] == "PENDING"
     assert int(req["ttl"]["N"]) == NOW + 30 * 86400  # deleted by DynamoDB TTL after 30 days
@@ -73,6 +74,7 @@ def test_happy_path_sends_resume_once():
     done = run_approve(ddb, ses, params, "POST")
     assert done["statusCode"] == 200
     assert requests_in(ddb)[0]["status"]["S"] == "SENT"
+    assert ses.sent[1]["FeedbackForwardingEmailAddress"] == "owner@example.com"
     raw = ses.sent[1]["Content"]["Raw"]["Data"]
     msg = message_from_bytes(raw)
     assert msg["To"] == "ana@recruit.example"

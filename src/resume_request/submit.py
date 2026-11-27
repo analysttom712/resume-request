@@ -154,6 +154,7 @@ def process(event: dict, cfg: Settings, deps: Deps, now: float | None = None) ->
     try:
         deps.ses.send_email(
             FromEmailAddress=cfg.sender,
+            FeedbackForwardingEmailAddress=cfg.reply_to,  # bounces/complaints reach a real inbox
             Destination={"ToAddresses": [cfg.owner_email]},
             ReplyToAddresses=[fields["email"]],
             Content={

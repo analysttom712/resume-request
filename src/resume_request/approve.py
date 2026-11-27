@@ -118,6 +118,7 @@ def process(event: dict, cfg: Settings, deps: Deps, now: float | None = None) ->
         pdf = deps.s3.get_object(Bucket=cfg.bucket, Key=cfg.resume_key)["Body"].read()
         deps.ses.send_email(
             FromEmailAddress=cfg.sender,
+            FeedbackForwardingEmailAddress=cfg.reply_to,  # bounces/complaints reach a real inbox
             Destination={"ToAddresses": [email]},
             Content={"Raw": {"Data": build_message(cfg, name, email, pdf)}},
         )
