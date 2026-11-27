@@ -1,0 +1,254 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Transform: AWS::Serverless-2016-10-31
+Description: >-
+  Resume on request. A recruiter submits name, email and company on the website;
+  the owner gets an email with a signed, single-use Approve link; approving emails
+  the resume PDF from a private S3 bucket. Requests are deleted after 30 days.
+
+Parameters:
+  Domain:
+    Type: String
+    Default: thomasbaynum.dev
+    Description: SES domain identity the email is sent from.
+  Sender:
+    Type: String
+    Default: resume@thomasbaynum.dev
+  ReplyTo:
+    Type: String
+    Default: thomasbaynum.dev@gmail.com
+    Description: Where replies to the resume email go (there is no inbox at the domain).
+  OwnerEmail:
+    Type: String
+    Default: thomasbaynum.dev@gmail.com
+    Description: Receives the approval emails.
+  AllowedOrigin:
+    Type: String
+    Default: https://thomasbaynum.dev
+    Description: The only website allowed to call POST /request.
+  SecretParamName:
+    Type: String
+    Default: /resume-request/hmac-key
+    Description: >-
+      SSM Parameter Store SecureString holding the approve-link signing key.
+      Created once by hand (CloudFormation can't create SecureStrings); see README.
+  ResumeKey:
+    Type: String
+    Default: resume/Thomas-Baynum-Resume.pdf
+  DailyCap:
+    Type: Number
+    Default: 20
+    Description: Most owner emails per UTC day; requests past this get HTTP 429.
+  ThrottleRate:
+    Type: Number
+    Default: 1
+    Description: Steady-state requests per second allowed by API Gateway, all routes.
+  ThrottleBurst:
+    Type: Number
+    Default: 5
+  ReservedConcurrency:
+    Type: Number
+    Default: 0
+    Description: >-
+      Per-function concurrency cap. 0 = not set (new accounts with a 10-execution
+      limit can't reserve any; API Gateway throttling is the main cap).
+
+Conditions:
+  SetReservedConcurrency: !Not [!Equals [!Ref ReservedConcurrency, 0]]
+
+Globals:
+  Function:
+    Runtime: python3.13
+    Architectures: [arm64]
+    MemorySize: 256
+    Timeout: 15
+    CodeUri: src/
+    ReservedConcurrentExecutions: !If [SetReservedConcurrency, !Ref ReservedConcurrency, !Ref AWS::NoValue]
+    Environment:
+      Variables:
+        TABLE_NAME: !Ref RequestsTable
+        SECRET_PARAM: !Ref SecretParamName
+        SENDER: !Ref Sender
+        REPLY_TO: !Ref ReplyTo
+        OWNER_EMAIL: !Ref OwnerEmail
+        ALLOWED_ORIGIN: !Ref AllowedOrigin
+        RECORD_TTL_DAYS: "30"
+        LINK_TTL_SECONDS: "604800"
+
+Resources:
+  # ---------------------------------------------------------------- storage
+
+  RequestsTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: pk
+          AttributeType: S
+      KeySchema:
+        - AttributeName: pk
+          KeyType: HASH
+      TimeToLiveSpecification:   # DynamoDB deletes each item after its ttl (30 days for requests)
+        AttributeName: ttl
+        Enabled: true
+
+  ResumeBucket:
+    Type: AWS::S3::Bucket
+    DeletionPolicy: Retain          # never lose the resume with a stack delete
+    UpdateReplacePolicy: Retain
+    Properties:
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      OwnershipControls:
+        Rules:
+          - ObjectOwnership: BucketOwnerEnforced
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      VersioningConfiguration:
+        Status: Enabled             # an overwritten resume can be rolled back
+      LifecycleConfiguration:
+        Rules:
+          - Id: expire-old-versions
+            Status: Enabled
+            NoncurrentVersionExpiration:
+              NoncurrentDays: 90
+
+  ResumeBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref ResumeBucket
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: DenyInsecureTransport
+            Effect: Deny
+            Principal: "*"
+            Action: "s3:*"
+            Resource:
+              - !GetAtt ResumeBucket.Arn
+              - !Sub "${ResumeBucket.Arn}/*"
+            Condition:
+              Bool:
+                aws:SecureTransport: "false"
+
+  # -------------------------------------------------------------------- API
+
+  Api:
+    Type: AWS::Serverless::HttpApi
+    Properties:
+      CorsConfiguration:
+        AllowOrigins: [!Ref AllowedOrigin]
+        AllowMethods: [POST]
+        AllowHeaders: [content-type]
+        MaxAge: 600
+      DefaultRouteSettings:
+        ThrottlingRateLimit: !Ref ThrottleRate
+        ThrottlingBurstLimit: !Ref ThrottleBurst
+
+  # -------------------------------------------------------------- functions
+
+  SubmitFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      Description: POST /request - store the request and email the owner an Approve link
+      Handler: resume_request.submit.handler
+      Environment:
+        Variables:
+          DAILY_CAP: !Ref DailyCap
+      Events:
+        Submit:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref Api
+            Path: /request
+            Method: POST
+      Policies:
+        - Statement:
+            - Effect: Allow
+              Action: [dynamodb:PutItem, dynamodb:UpdateItem, dynamodb:DeleteItem]
+              Resource: !GetAtt RequestsTable.Arn
+            - Effect: Allow
+              Action: ssm:GetParameter
+              Resource: !Sub "arn:${AWS::Partition}:ssm:${AWS::Region}:${AWS::AccountId}:parameter${SecretParamName}"
+            - Effect: Allow
+              Action: ses:SendEmail
+              Resource:
+                - !Sub "arn:${AWS::Partition}:ses:${AWS::Region}:${AWS::AccountId}:identity/${Domain}"
+                # Only matters while SES is in the sandbox, where the recipient must be a verified identity.
+                - !Sub "arn:${AWS::Partition}:ses:${AWS::Region}:${AWS::AccountId}:identity/${OwnerEmail}"
+              Condition:
+                StringEquals:
+                  ses:FromAddress: !Ref Sender
+
+  ApproveFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      Description: GET/POST /approve - confirm, then email the resume PDF once
+      Handler: resume_request.approve.handler
+      Environment:
+        Variables:
+          RESUME_BUCKET: !Ref ResumeBucket
+          RESUME_KEY: !Ref ResumeKey
+      Events:
+        Show:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref Api
+            Path: /approve
+            Method: GET
+        Confirm:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref Api
+            Path: /approve
+            Method: POST
+      Policies:
+        - Statement:
+            - Effect: Allow
+              Action: [dynamodb:GetItem, dynamodb:UpdateItem]
+              Resource: !GetAtt RequestsTable.Arn
+            - Effect: Allow
+              Action: s3:GetObject
+              Resource: !Sub "${ResumeBucket.Arn}/${ResumeKey}"
+            - Effect: Allow
+              Action: ssm:GetParameter
+              Resource: !Sub "arn:${AWS::Partition}:ssm:${AWS::Region}:${AWS::AccountId}:parameter${SecretParamName}"
+            - Effect: Allow
+              Action: [ses:SendEmail, ses:SendRawEmail]
+              Resource:
+                - !Sub "arn:${AWS::Partition}:ses:${AWS::Region}:${AWS::AccountId}:identity/${Domain}"
+                # Sandbox only: lets an end-to-end test send to the owner's verified address.
+                - !Sub "arn:${AWS::Partition}:ses:${AWS::Region}:${AWS::AccountId}:identity/${OwnerEmail}"
+              Condition:
+                StringEquals:
+                  ses:FromAddress: !Ref Sender
+
+  # Two weeks of logs is enough to debug; logs hold request ids only, no personal data.
+  SubmitLogs:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub "/aws/lambda/${SubmitFunction}"
+      RetentionInDays: 14
+
+  ApproveLogs:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub "/aws/lambda/${ApproveFunction}"
+      RetentionInDays: 14
+
+Outputs:
+  ApiUrl:
+    Value: !Sub "https://${Api}.execute-api.${AWS::Region}.${AWS::URLSuffix}"
+  SubmitUrl:
+    Description: The website's form posts JSON here.
+    Value: !Sub "https://${Api}.execute-api.${AWS::Region}.${AWS::URLSuffix}/request"
+  ResumeBucketName:
+    Value: !Ref ResumeBucket
+  ResumeKey:
+    Value: !Ref ResumeKey
+  RequestsTableName:
+    Value: !Ref RequestsTable

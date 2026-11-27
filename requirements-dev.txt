@@ -1,0 +1,5 @@
+# Local and CI tooling only. The Lambda code uses the Python standard library
+# plus boto3, which the Lambda runtime already provides, so nothing is bundled.
+pytest
+ruff
+cfn-lint

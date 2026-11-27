@@ -1,0 +1,16 @@
+[project]
+name = "resume-request"
+version = "0.1.0"
+description = "Resume on request: recruiter asks, owner approves by email, AWS sends the PDF."
+requires-python = ">=3.13"
+
+[tool.pytest.ini_options]
+pythonpath = ["src", "tests"]
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 120
+target-version = "py313"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP"]
