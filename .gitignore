@@ -1,0 +1,24 @@
+# Python
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+.ruff_cache/
+
+# SAM build output
+.aws-sam/
+
+# Secrets and private files: the resume lives only in the private S3 bucket
+.env
+*.pem
+.aws/
+.scan-blocklist.local.txt
+*.pdf
+*.doc
+*.docx
+samconfig.local.toml
+
+# OS / editors
+.DS_Store
+Thumbs.db
+.claude/settings.local.json

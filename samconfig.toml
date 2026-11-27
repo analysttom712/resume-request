@@ -1,0 +1,13 @@
+# Shared deploy settings. No account IDs or credentials here: pass your own
+# profile on the command line (sam deploy --profile <name>).
+version = 0.1
+
+[default.global.parameters]
+stack_name = "resume-request"
+region = "us-east-2"
+
+[default.deploy.parameters]
+capabilities = "CAPABILITY_IAM"
+confirm_changeset = true
+resolve_s3 = true
+s3_prefix = "resume-request"
